@@ -5,24 +5,23 @@
 #include <netdb.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <errno.h>
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <assert.h>
-#include <signal.h>
 
 /* Mia Lassiter
-CSEN 162: Project 1, web proxy */
+CSEN 162: Project 1, web proxy 
+Instructions: change your browser configuration to use a proxy. All HTTP requests using port 80 will be sent to the proxy at the loopback address 127.0.0.1
+*/
 
-#define HEADER_MAX 8192
 #define BUFF 1024
-#define N 30 //number of simultaneous connections that can be served
+#define N 100 //number of simultaneous connections that can be served
 
 //global variables
 int serverfd;
 int threadCt = 0;
 pthread_t connections[N];
+int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res);
 
 //extract server address
 char *extractServerAddress(const char *request) {
@@ -36,7 +35,6 @@ char *extractServerAddress(const char *request) {
             if(length < sizeof(extractedAddr)) {
                 strncpy(extractedAddr, start, length);
                 extractedAddr[length] = '\0';
-                printf("Line 40 \n");
                 return extractedAddr;
             }
         }
@@ -55,7 +53,7 @@ void *connectionHandler(void *sock) {
     char csbuf[BUFF]; //client-side receiving buffer
     char srbuf[BUFF]; //buffer holding destination address
 
-    printf("Connection established\n");
+    //printf("Connection established\n");
     if((n = read(connfd, csbuf, sizeof(csbuf)-1)) < 0) {
         perror("Failure reading client request \n");
         close(connfd);
@@ -66,27 +64,43 @@ void *connectionHandler(void *sock) {
     strcpy(srbuf, csbuf);
     char *extractAddr = extractServerAddress(csbuf);
 
-    if(extractAddr != NULL) {
+    if(extractAddr != NULL)
         printf("Server address: %s\n", extractAddr);
-    }
     else {
         close(connfd);
         return NULL;
     }
 
     //DNS resolution
-    struct addrinfo hints, *res;
-    memset(&hints, 0, sizeof(struct addrinfo));
+    struct addrinfo hints, *res = NULL, *p = NULL;
+    int status;
+    char ipstr[INET_ADDRSTRLEN];
+    memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = 0;
-    int status = getaddrinfo(extractAddr, "http", &hints, &res);
-    if(status != 0) {
-        fprintf(stderr, "getaddrinfo: %s \n", gai_strerror(status));
-        close(connfd);
-        return NULL;
-    }
+    hints.ai_flags = AI_PASSIVE;
+    hints.ai_protocol = IPPROTO_TCP;
     
+    if((status = getaddrinfo(extractAddr, NULL, &hints, &res)) != 0)
+        exit(1);
+    for(p = res; p != NULL; p = p->ai_next) {
+        void *a;
+        char *ipver;
+        //get the pointer to the address itself
+        if (p->ai_family == AF_INET) { //IPv4
+            struct sockaddr_in *ipv4 = (struct sockaddr_in *) p->ai_addr;
+            a = & (ipv4->sin_addr);
+            ipver = "IPv4";
+        } else {
+            struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *) p->ai_addr;
+            a = &(ipv6->sin6_addr);
+            ipver = "IPv6";
+        }
+        //convert IP to string and print it
+        inet_ntop(p->ai_family, a, ipstr, sizeof ipstr);
+        printf(" %s: %s\n", ipver, ipstr);
+    }
+   
     //Connect to the server
     int clientfd = socket(AF_INET, SOCK_STREAM, 0);
     if(clientfd < 0) {
@@ -94,7 +108,7 @@ void *connectionHandler(void *sock) {
         close(connfd);
         return NULL;
     }
-
+    printf("Connected to server \n");
     struct sockaddr_in addr;
     struct sockaddr_in *resolvedAddr = (struct sockaddr_in *)res->ai_addr;
     memcpy(&addr.sin_addr, &resolvedAddr->sin_addr, sizeof(struct in_addr));
@@ -108,7 +122,6 @@ void *connectionHandler(void *sock) {
         close(connfd);
         return NULL;
     }
-
     send(clientfd, srbuf, strlen(srbuf), 0);
     char response[1024];
     int bytes_recv = 0;
@@ -117,12 +130,9 @@ void *connectionHandler(void *sock) {
         int bytes_sent = send(connfd, response, n, 0);
         assert(bytes_sent != -1);
         memset(response, 0, sizeof(response));
-        if(n < 0) {
-            perror("Client read failure \n");
+        if(n < 0)
             return NULL;
-        }
-    }//end while
-
+    }
     close(connfd);
     close(clientfd);
     return NULL;
@@ -139,10 +149,11 @@ int main(int argc, char *argv[]) {
     if (argc != 2){
 	    printf ("Usage: %s <port #> \n",argv[0]);
 	    exit(1);
-    }  
+    }
 
     struct sockaddr_in servAddr;
     int addrlen = sizeof(servAddr);
+    int socket_option = 1;
     memset(&servAddr, 0, sizeof(servAddr));
     
     if((serverfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -150,12 +161,15 @@ int main(int argc, char *argv[]) {
         close(serverfd);
         exit(1);
     }
+    
+    setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&socket_option, sizeof(int)); //configure the socket to ignore bind reuse error
+    struct timeval timeout = {5, 0}; //set a 5-second timeout when waiting to receive
+    setsockopt(serverfd, SOL_SOCKET, SO_RCVTIMEO, (const void *)&timeout, sizeof(timeout));
 
     //set the server address to send using socket addressing structure
     servAddr.sin_family = AF_INET;
     servAddr.sin_port = htons(atoi(argv[1]));
     servAddr.sin_addr.s_addr = INADDR_ANY;
-
     if(bind(serverfd, (struct sockaddr *)&servAddr, sizeof(servAddr)) < 0) {
         perror("Failure to bind to the endpoint socket\n");
         close(serverfd);
